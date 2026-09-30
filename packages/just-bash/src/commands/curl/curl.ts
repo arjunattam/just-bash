@@ -5,7 +5,11 @@
  * Network access must be explicitly configured via BashEnvOptions.network.
  */
 
-import { decodeBytesToUtf8 } from "../../encoding.js";
+import {
+  decodeBytesToUtf8,
+  EMPTY_BYTES,
+  latin1FromBytes,
+} from "../../encoding.js";
 import { fromBuffer } from "../../fs/encoding.js";
 import { getErrorMessage } from "../../interpreter/helpers/errors.js";
 import { _Headers } from "../../security/trusted-globals.js";
@@ -32,29 +36,50 @@ import type { CurlOptions } from "./types.js";
  * data flags were given.
  *
  * Per-part `@file` handling mirrors real curl:
- *   - ascii (`-d`/`--data` @file): strip CR and LF after reading.
+ *   - ascii (`-d`/`--data` @file): strip NUL, CR, and LF after reading.
  *   - binary (`--data-binary` @file): send the bytes verbatim.
  *   - urlencode (`--data-urlencode` @file/name@file): URL-encode the whole
  *     file body as one value (so a `=` byte inside the file is percent-encoded
  *     rather than treated as a name/value separator), with an optional
  *     `name=` prefix.
+ * The exact `-` source consumes command stdin once; later references are empty.
  */
 async function resolveData(
   options: CurlOptions,
   ctx: RuntimeCommandContext,
-): Promise<string | undefined> {
+): Promise<string | Uint8Array<ArrayBuffer> | undefined> {
   if (options.dataParts.length === 0) return undefined;
-  const parts: string[] = [];
+  const parts: (string | Buffer)[] = [];
+  let stdinConsumed = false;
   for (const part of options.dataParts) {
     if (part.file) {
+      if (part.file.mode === "binary") {
+        if (part.file.path === "-") {
+          parts.push(
+            Buffer.from(
+              latin1FromBytes(stdinConsumed ? EMPTY_BYTES : ctx.stdin),
+              "latin1",
+            ),
+          );
+          stdinConsumed = true;
+        } else {
+          parts.push(
+            Buffer.from(
+              await ctx.fs.readFileBuffer(
+                ctx.fs.resolvePath(ctx.cwd, part.file.path),
+              ),
+            ),
+          );
+        }
+        continue;
+      }
       const content =
         part.file.path === "-"
-          ? decodeBytesToUtf8(ctx.stdin)
+          ? decodeBytesToUtf8(stdinConsumed ? EMPTY_BYTES : ctx.stdin)
           : await ctx.fs.readFile(ctx.fs.resolvePath(ctx.cwd, part.file.path));
+      if (part.file.path === "-") stdinConsumed = true;
       if (part.file.mode === "ascii") {
-        parts.push(content.replace(/[\r\n]/g, ""));
-      } else if (part.file.mode === "binary") {
-        parts.push(content);
+        parts.push(content.replace(/[\x00\r\n]/g, ""));
       } else {
         const encoded = encodeCurlData(content);
         parts.push(part.file.name ? `${part.file.name}=${encoded}` : encoded);
@@ -63,7 +88,13 @@ async function resolveData(
       parts.push(part.value ?? "");
     }
   }
-  return parts.join("&");
+  if (!parts.some(Buffer.isBuffer)) return parts.join("&");
+  const chunks: Buffer[] = [];
+  for (const part of parts) {
+    if (chunks.length > 0) chunks.push(Buffer.from("&"));
+    chunks.push(typeof part === "string" ? Buffer.from(part) : part);
+  }
+  return new Uint8Array(Buffer.concat(chunks));
 }
 
 /**
@@ -73,8 +104,8 @@ async function resolveData(
 async function prepareRequestBody(
   options: CurlOptions,
   ctx: RuntimeCommandContext,
-  resolvedData: string | undefined,
-): Promise<{ body?: string; contentType?: string }> {
+  resolvedData: string | Uint8Array<ArrayBuffer> | undefined,
+): Promise<{ body?: string | Uint8Array<ArrayBuffer>; contentType?: string }> {
   // Handle -T/--upload-file
   if (options.uploadFile) {
     const filePath = ctx.fs.resolvePath(ctx.cwd, options.uploadFile);
@@ -294,7 +325,12 @@ export const curlCommand: RuntimeCommand = {
       const resolvedData = await resolveData(options, ctx);
 
       if (options.getMode) {
-        url = appendDataToUrl(url, resolvedData);
+        url = appendDataToUrl(
+          url,
+          resolvedData instanceof Uint8Array
+            ? Buffer.from(resolvedData).toString()
+            : resolvedData,
+        );
       }
 
       // Prepare body and headers
