@@ -218,7 +218,27 @@ describe("curl @file interpretation", () => {
   });
 
   describe("data from stdin with @-", () => {
-    it.fails("-d @- reads stdin and strips CR and LF", async () => {
+    it("keeps --data-raw literal while reading explicit dash paths as files", async () => {
+      const env = createEnv({ "/-": "file body" });
+      const result = await env.exec(
+        "curl --data-raw @- -d @/- --data-binary @- https://api.example.com/test",
+        { stdin: "stdin body" },
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(lastRequest?.options.body).toBe("@-&file body&stdin body");
+    });
+
+    it("sends an empty POST body when stdin is empty", async () => {
+      const env = createEnv();
+      const result = await env.exec("curl -d @- https://api.example.com/test");
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(lastRequest?.options.method).toBe("POST");
+      expect(lastRequest?.options.body).toBeUndefined();
+    });
+
+    it("-d @- reads stdin and strips CR and LF", async () => {
       const env = createEnv();
       const result = await env.exec("curl -d @- https://api.example.com/test", {
         stdin: "first=1\n&second=2\r\n",
@@ -229,7 +249,7 @@ describe("curl @file interpretation", () => {
       expect(lastRequest?.options.body).toBe("first=1&second=2");
     });
 
-    it.fails("--data-binary @- reads stdin verbatim", async () => {
+    it("--data-binary @- reads stdin verbatim", async () => {
       const env = createEnv();
       const result = await env.exec(
         "curl --data-binary @- https://api.example.com/test",
@@ -241,7 +261,7 @@ describe("curl @file interpretation", () => {
       expect(lastRequest?.options.body).toBe("first line\nsecond line\r\n");
     });
 
-    it.fails("--data-urlencode @- URL-encodes stdin", async () => {
+    it("--data-urlencode @- URL-encodes stdin", async () => {
       const env = createEnv();
       const result = await env.exec(
         "curl --data-urlencode @- https://api.example.com/test",
@@ -252,7 +272,7 @@ describe("curl @file interpretation", () => {
       expect(lastRequest?.options.body).toBe("hello+world+%26+friends");
     });
 
-    it.fails("--data-urlencode name@- prefixes URL-encoded stdin", async () => {
+    it("--data-urlencode name@- prefixes URL-encoded stdin", async () => {
       const env = createEnv();
       const result = await env.exec(
         "curl --data-urlencode note@- https://api.example.com/test",

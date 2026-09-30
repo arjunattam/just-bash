@@ -5,6 +5,7 @@
  * Network access must be explicitly configured via BashEnvOptions.network.
  */
 
+import { decodeBytesToUtf8 } from "../../encoding.js";
 import { fromBuffer } from "../../fs/encoding.js";
 import { getErrorMessage } from "../../interpreter/helpers/errors.js";
 import { _Headers } from "../../security/trusted-globals.js";
@@ -46,8 +47,10 @@ async function resolveData(
   const parts: string[] = [];
   for (const part of options.dataParts) {
     if (part.file) {
-      const filePath = ctx.fs.resolvePath(ctx.cwd, part.file.path);
-      const content = await ctx.fs.readFile(filePath);
+      const content =
+        part.file.path === "-"
+          ? decodeBytesToUtf8(ctx.stdin)
+          : await ctx.fs.readFile(ctx.fs.resolvePath(ctx.cwd, part.file.path));
       if (part.file.mode === "ascii") {
         parts.push(content.replace(/[\r\n]/g, ""));
       } else if (part.file.mode === "binary") {
