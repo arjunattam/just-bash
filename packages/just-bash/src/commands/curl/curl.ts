@@ -9,8 +9,9 @@ import {
   decodeBytesToUtf8,
   EMPTY_BYTES,
   latin1FromBytes,
+  utf8ByteLength,
 } from "../../encoding.js";
-import { fromBuffer } from "../../fs/encoding.js";
+import { fromBuffer, toBuffer } from "../../fs/encoding.js";
 import { getErrorMessage } from "../../interpreter/helpers/errors.js";
 import { _Headers } from "../../security/trusted-globals.js";
 import type {
@@ -28,6 +29,9 @@ import {
   formatHeaderBlock,
 } from "./response-formatting.js";
 import type { CurlOptions } from "./types.js";
+
+const requestDataEncoder = new TextEncoder();
+const requestDataDecoder = new TextDecoder("utf8", { ignoreBOM: true });
 
 /**
  * Resolve every `-d`/`--data*`/`--data-urlencode` part into a single payload,
@@ -49,25 +53,25 @@ async function resolveData(
   ctx: RuntimeCommandContext,
 ): Promise<string | Uint8Array<ArrayBuffer> | undefined> {
   if (options.dataParts.length === 0) return undefined;
-  const parts: (string | Buffer)[] = [];
+  const parts: (string | Uint8Array)[] = [];
   let stdinConsumed = false;
+  let hasBinaryData = false;
   for (const part of options.dataParts) {
     if (part.file) {
       if (part.file.mode === "binary") {
+        hasBinaryData = true;
         if (part.file.path === "-") {
           parts.push(
-            Buffer.from(
+            toBuffer(
               latin1FromBytes(stdinConsumed ? EMPTY_BYTES : ctx.stdin),
-              "latin1",
+              "binary",
             ),
           );
           stdinConsumed = true;
         } else {
           parts.push(
-            Buffer.from(
-              await ctx.fs.readFileBuffer(
-                ctx.fs.resolvePath(ctx.cwd, part.file.path),
-              ),
+            await ctx.fs.readFileBuffer(
+              ctx.fs.resolvePath(ctx.cwd, part.file.path),
             ),
           );
         }
@@ -88,13 +92,31 @@ async function resolveData(
       parts.push(part.value ?? "");
     }
   }
-  if (!parts.some(Buffer.isBuffer)) return parts.join("&");
-  const chunks: Buffer[] = [];
+  if (!hasBinaryData) return parts.join("&");
+  let byteLength = parts.length - 1;
   for (const part of parts) {
-    if (chunks.length > 0) chunks.push(Buffer.from("&"));
-    chunks.push(typeof part === "string" ? Buffer.from(part) : part);
+    byteLength +=
+      typeof part === "string" ? utf8ByteLength(part) : part.byteLength;
   }
-  return new Uint8Array(Buffer.concat(chunks));
+  const body = new Uint8Array(byteLength);
+  let offset = 0;
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index > 0) {
+      body[offset] = 0x26;
+      offset += 1;
+    }
+    const part = parts[index];
+    if (typeof part === "string") {
+      offset += requestDataEncoder.encodeInto(
+        part,
+        body.subarray(offset),
+      ).written;
+    } else {
+      body.set(part, offset);
+      offset += part.byteLength;
+    }
+  }
+  return body;
 }
 
 /**
@@ -328,7 +350,7 @@ export const curlCommand: RuntimeCommand = {
         url = appendDataToUrl(
           url,
           resolvedData instanceof Uint8Array
-            ? Buffer.from(resolvedData).toString()
+            ? requestDataDecoder.decode(resolvedData)
             : resolvedData,
         );
       }
